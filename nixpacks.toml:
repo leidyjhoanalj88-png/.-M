@@ -1,2 +1,6 @@
 [phases.setup]
-nixPkgs = ["chromium", "chromedriver"]
+nixPkgs = ["chromium", "chromium-chromedriver"]
+
+[variables]
+WDM_SKIP_VERSION_CHECK = "true"
+CHROMEDRIVER_PATH = "/usr/bin/chromedriver"
