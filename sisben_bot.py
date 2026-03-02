@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import logging, time, os
+import logging, time, os, glob
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -14,7 +14,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
 
 TOKEN    = "8574051542:AAH_N4RBST0wCpkLKDOFNEc1R93vePWxEPY"
 ADMIN_ID = 8114050673
@@ -42,29 +41,41 @@ def get_driver():
     opts.add_experimental_option("excludeSwitches",["enable-logging","enable-automation"])
     opts.add_experimental_option("useAutomationExtension",False)
 
-    # Buscar Chrome/Chromium instalado por nixpacks
-    chrome_bin = None
-    for path in ["/usr/bin/chromium","/usr/bin/chromium-browser",
-                 "/usr/bin/google-chrome","/usr/bin/chrome",
-                 "/nix/var/nix/profiles/default/bin/chromium"]:
-        if os.path.exists(path):
-            chrome_bin = path
-            break
+    # Buscar binario de Chrome/Chromium
+    chrome_bin = os.environ.get("CHROME_BIN")
     if not chrome_bin:
-        import glob
+        for path in ["/usr/bin/chromium","/usr/bin/chromium-browser",
+                     "/usr/bin/google-chrome","/usr/bin/chrome"]:
+            if os.path.exists(path):
+                chrome_bin = path
+                break
+    if not chrome_bin:
         resultados = glob.glob("/nix/store/*/bin/chromium*")
         if resultados:
-            chrome_bin = resultados[0]
+            chrome_bin = sorted(resultados)[0]
     if chrome_bin:
         opts.binary_location = chrome_bin
+        logger.info(f"Chrome binary: {chrome_bin}")
 
-    try:
-        return webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=opts
-        )
-    except Exception:
-        return webdriver.Chrome(options=opts)
+    # Buscar chromedriver
+    chromedriver = os.environ.get("CHROMEDRIVER_PATH")
+    if not chromedriver:
+        for path in ["/usr/bin/chromedriver","/usr/bin/chromium-driver",
+                     "/usr/lib/chromium/chromedriver",
+                     "/usr/lib/chromium-browser/chromedriver"]:
+            if os.path.exists(path):
+                chromedriver = path
+                break
+    if not chromedriver:
+        resultados = glob.glob("/nix/store/*/bin/chromedriver*")
+        if resultados:
+            chromedriver = sorted(resultados)[0]
+
+    if chromedriver:
+        logger.info(f"Chromedriver: {chromedriver}")
+        return webdriver.Chrome(service=Service(chromedriver), options=opts)
+
+    return webdriver.Chrome(options=opts)
 
 
 def consultar_sisben(tipo, numero):
@@ -76,18 +87,14 @@ def consultar_sisben(tipo, numero):
         time.sleep(5)
 
         wait = WebDriverWait(driver, 20)
-
-        # Seleccionar tipo de documento
         Select(wait.until(EC.presence_of_element_located((By.ID, "TipoID")))).select_by_value(tipo)
         time.sleep(1)
 
-        # Ingresar número
         inp = driver.find_element(By.ID, "documento")
         inp.clear()
         inp.send_keys(numero)
         time.sleep(1)
 
-        # Click en consultar
         driver.execute_script("arguments[0].click();", driver.find_element(By.ID, "botonenvio"))
         time.sleep(8)
 
@@ -98,10 +105,10 @@ def consultar_sisben(tipo, numero):
         r = {}
         try:
             r["grupo"] = driver.find_element(By.XPATH, "//p[contains(@class,'text-uppercase') and contains(@class,'text-white')]").text.strip()
-        except Exception: pass
+        except: pass
         try:
             r["clasificacion"] = driver.find_element(By.XPATH, "//div[contains(@class,'imagenpuntaje')]//p[contains(@style,'18px')]").text.strip()
-        except Exception: pass
+        except: pass
 
         for label, key in [("Nombres","nombres"),("Apellidos","apellidos"),
                            ("Municipio","municipio"),("Departamento","departamento"),
@@ -110,18 +117,19 @@ def consultar_sisben(tipo, numero):
             try:
                 v = driver.find_element(By.XPATH, f"//p[contains(text(),'{label}')]/following-sibling::p[1]").text.strip()
                 if v: r[key] = " ".join(v.split())
-            except Exception: pass
+            except: pass
 
         return r if r else None
 
     except TimeoutException:
         return {"error": "Tiempo de espera agotado"}
     except Exception as e:
+        logger.error(f"Error consulta: {e}")
         return {"error": str(e)}
     finally:
         if driver:
             try: driver.quit()
-            except Exception: pass
+            except: pass
 
 
 def fmt(r):
@@ -169,13 +177,13 @@ async def ingresar_numero(u, c):
     numero = u.message.text.strip()
     if not numero or not numero.replace("-","").replace(" ","").isalnum():
         await u.message.reply_text("Número inválido. Intenta de nuevo:"); return INGRESANDO_NUMERO
-    msg = await u.message.reply_text("⏳ Consultando SISBEN... (~15 segundos)")
+    msg = await u.message.reply_text("⏳ Consultando SISBEN... (~20 segundos)")
     resultado = consultar_sisben(c.user_data["tipo"], numero)
     await msg.edit_text(fmt(resultado))
     try:
         await c.bot.send_message(chat_id=ADMIN_ID,
             text=f"📌 Consulta\nID: {u.effective_user.id}\nNombre: {u.effective_user.full_name}\nDoc: {numero}")
-    except Exception: pass
+    except: pass
     return ConversationHandler.END
 
 async def cancelar(u, c): await u.message.reply_text("Cancelado."); return ConversationHandler.END
@@ -194,8 +202,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(conv)
-    print("Bot SISBEN v7.0 (Railway+Selenium) iniciado...")
-    app.run_polling()
+    logger.info("Bot SISBEN iniciado...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
