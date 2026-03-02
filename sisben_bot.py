@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ==============================================================================
-                    CONSULTA SISBEN - BOT DE TELEGRAM v3.0
-                    Versión rápida con requests (sin Selenium)
+                    CONSULTA SISBEN - BOT DE TELEGRAM v4.0
+                    URL corregida: reportes.sisben.gov.co
 ==============================================================================
 """
 
@@ -35,54 +35,55 @@ logger = logging.getLogger(__name__)
 ELIGIENDO_TIPO, INGRESANDO_NUMERO = range(2)
 
 TIPOS_DOCUMENTO = [
-    ("📄 Registro Civil",              "1"),
-    ("🪪 Tarjeta de Identidad",        "2"),
-    ("🆔 Cédula de Ciudadanía",        "3"),
-    ("🌐 Cédula de Extranjería",       "4"),
-    ("📋 DNI País de Origen",          "5"),
-    ("📘 DNI Pasaporte",               "6"),
-    ("🛡️ Salvoconducto Refugiado",     "7"),
-    ("📝 Permiso Esp. Permanencia",    "8"),
-    ("🔖 Permiso Protec. Temporal",    "9"),
+    ("📄 Registro Civil",           "1"),
+    ("🪪 Tarjeta de Identidad",     "2"),
+    ("🆔 Cédula de Ciudadanía",     "3"),
+    ("🌐 Cédula de Extranjería",    "4"),
+    ("📋 DNI País de Origen",       "5"),
+    ("📘 DNI Pasaporte",            "6"),
+    ("🛡️ Salvoconducto Refugiado",  "7"),
+    ("📝 Permiso Esp. Permanencia", "8"),
+    ("🔖 Permiso Protec. Temporal", "9"),
 ]
 
-URL_SISBEN = "https://www.sisben.gov.co/dnp_sisbenconsulta"
+# URLs correctas
+URL_BASE     = "https://reportes.sisben.gov.co/dnp_sisbenconsulta"
+URL_PAGINA   = "https://portal-sisben.sisben.gov.co/Paginas/consulta-tu-grupo.html"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-CO,es;q=0.9",
     "Content-Type": "application/x-www-form-urlencoded",
-    "Referer": "https://www.sisben.gov.co/Paginas/consulta-tu-grupo.html",
-    "Origin": "https://www.sisben.gov.co",
+    "Referer": URL_PAGINA,
+    "Origin": "https://reportes.sisben.gov.co",
 }
 
 
-# ── Consulta rápida con requests ──────────────────────────────────────────────
+# ── Consulta rápida ───────────────────────────────────────────────────────────
 def consultar_sisben(tipo_doc, numero_doc):
     try:
         session = requests.Session()
         session.headers.update(HEADERS)
 
-        # Primero cargar la página para obtener cookies/tokens
-        session.get(
-            "https://www.sisben.gov.co/Paginas/consulta-tu-grupo.html",
-            timeout=10
-        )
+        # Obtener cookies
+        session.get(URL_PAGINA, timeout=10)
 
-        # Hacer la consulta
+        # Hacer consulta
         data = {
-            "TipoID": tipo_doc,
-            "documento": numero_doc,
+            "TipoID":     tipo_doc,
+            "documento":  numero_doc,
         }
 
-        resp = session.post(URL_SISBEN, data=data, timeout=15)
+        resp = session.post(URL_BASE, data=data, timeout=15)
         resp.raise_for_status()
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html = resp.text
 
-        # Verificar si no se encontró
-        if "no se encontr" in resp.text.lower():
+        if "no se encontr" in html.lower() or "no encontrado" in html.lower():
             return None
 
+        soup = BeautifulSoup(html, "html.parser")
         resultado = {}
 
         # Grupo SISBEN
@@ -90,10 +91,10 @@ def consultar_sisben(tipo_doc, numero_doc):
         if grupo:
             resultado["grupo"] = grupo.get_text(strip=True)
 
-        # Clasificacion/Puntaje
-        clasif = soup.find("div", class_=lambda c: c and "imagenpuntaje" in c)
-        if clasif:
-            p = clasif.find("p", style=lambda s: s and "18px" in s)
+        # Puntaje/Clasificacion
+        div_puntaje = soup.find("div", class_=lambda c: c and "imagenpuntaje" in c)
+        if div_puntaje:
+            p = div_puntaje.find("p", style=lambda s: s and "18px" in s)
             if p:
                 resultado["clasificacion"] = p.get_text(strip=True)
 
@@ -120,7 +121,7 @@ def consultar_sisben(tipo_doc, numero_doc):
             for campo, key in campos.items():
                 if campo in texto and i + 1 < len(parrafos):
                     valor = parrafos[i + 1].get_text(strip=True)
-                    if valor:
+                    if valor and valor != texto:
                         resultado[key] = " ".join(valor.split())
 
         return resultado if resultado else None
@@ -134,12 +135,12 @@ def formatear_resultado(r):
     if not r:
         return (
             "❌ *NO ENCONTRADO*\n\n"
-            "Este documento no está registrado en el SISBEN IV\n"
+            "Este documento no está en el SISBEN IV\n"
             "o los datos son incorrectos."
         )
 
     if "error" in r:
-        return f"⚠️ *Error al consultar:*\n`{r['error']}`"
+        return f"⚠️ *Error:*\n`{r['error']}`"
 
     msg = "✅ *RESULTADO SISBEN IV*\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -153,7 +154,7 @@ def formatear_resultado(r):
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
     if "nombres"      in r: msg += f"• Nombres: `{r['nombres']}`\n"
     if "apellidos"    in r: msg += f"• Apellidos: `{r['apellidos']}`\n"
-    if "num_doc"      in r: msg += f"• Cédula: `{r['num_doc']}`\n"
+    if "num_doc"      in r: msg += f"• Documento: `{r['num_doc']}`\n"
     if "municipio"    in r: msg += f"• Municipio: `{r['municipio']}`\n"
     if "departamento" in r: msg += f"• Dpto: `{r['departamento']}`\n"
 
@@ -195,7 +196,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Bot Consulta SISBEN IV*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🇨🇴 DNP — República de Colombia\n\n"
-        "📌 Comandos:\n"
+        "📌 *Comandos:*\n"
         "• /consultar — Consultar SISBEN\n"
         "• /ayuda — Ver ayuda\n"
         "• /cancelar — Cancelar consulta",
@@ -220,7 +221,7 @@ async def elegir_tipo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Consulta cancelada.")
         return ConversationHandler.END
 
-    valor = query.data.replace("tipo_", "")
+    valor  = query.data.replace("tipo_", "")
     nombre = next((n for n, v in TIPOS_DOCUMENTO if v == valor), valor)
 
     context.user_data["tipo_doc"]    = valor
@@ -242,7 +243,7 @@ async def ingresar_numero(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("⏳ *Consultando SISBEN...*", parse_mode="Markdown")
 
-    tipo   = context.user_data["tipo_doc"]
+    tipo      = context.user_data["tipo_doc"]
     resultado = consultar_sisben(tipo, numero)
     mensaje   = formatear_resultado(resultado)
 
@@ -276,7 +277,7 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /consultar — Iniciar consulta\n"
         "• /cancelar — Cancelar\n"
         "• /ayuda — Esta ayuda\n\n"
-        "💡 *Tip:* La consulta tarda solo unos segundos.",
+        "💡 La consulta tarda solo unos segundos.",
         parse_mode="Markdown"
     )
 
@@ -298,7 +299,7 @@ def main():
     app.add_handler(CommandHandler("ayuda",   ayuda))
     app.add_handler(conv)
 
-    print("🤖 Bot SISBEN v3.0 iniciado...")
+    print("🤖 Bot SISBEN v4.0 iniciado...")
     app.run_polling()
 
 
