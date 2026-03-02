@@ -1,8 +1,1 @@
-[phases.setup]
-nixPkgs = ["chromium", "chromedriver"]
-
-[phases.build]
-cmds = ["pip install -r requirements.txt"]
-
-[start]
-cmd = "python sisben_bot.py
+python-3.11.8
