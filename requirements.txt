@@ -1,5 +1,6 @@
-python-telegram-bot==20.7
-selenium
+python-telegram-bot[job-queue]==20.7
+httpx==0.27.0
+selenium==4.18.1
 requests
 beautifulsoup4
 webdriver-manager
