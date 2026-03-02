@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import logging, time, os, glob
+import logging, time, os, glob, subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -41,7 +41,6 @@ def get_driver():
     opts.add_experimental_option("excludeSwitches",["enable-logging","enable-automation"])
     opts.add_experimental_option("useAutomationExtension",False)
 
-    # Buscar binario de Chrome/Chromium
     chrome_bin = os.environ.get("CHROME_BIN")
     if not chrome_bin:
         for path in ["/usr/bin/chromium","/usr/bin/chromium-browser",
@@ -55,9 +54,7 @@ def get_driver():
             chrome_bin = sorted(resultados)[0]
     if chrome_bin:
         opts.binary_location = chrome_bin
-        logger.info(f"Chrome binary: {chrome_bin}")
 
-    # Buscar chromedriver
     chromedriver = os.environ.get("CHROMEDRIVER_PATH")
     if not chromedriver:
         for path in ["/usr/bin/chromedriver","/usr/bin/chromium-driver",
@@ -72,9 +69,7 @@ def get_driver():
             chromedriver = sorted(resultados)[0]
 
     if chromedriver:
-        logger.info(f"Chromedriver: {chromedriver}")
         return webdriver.Chrome(service=Service(chromedriver), options=opts)
-
     return webdriver.Chrome(options=opts)
 
 
@@ -103,11 +98,9 @@ def consultar_sisben(tipo, numero):
             return None
 
         r = {}
-        try:
-            r["grupo"] = driver.find_element(By.XPATH, "//p[contains(@class,'text-uppercase') and contains(@class,'text-white')]").text.strip()
+        try: r["grupo"] = driver.find_element(By.XPATH,"//p[contains(@class,'text-uppercase') and contains(@class,'text-white')]").text.strip()
         except: pass
-        try:
-            r["clasificacion"] = driver.find_element(By.XPATH, "//div[contains(@class,'imagenpuntaje')]//p[contains(@style,'18px')]").text.strip()
+        try: r["clasificacion"] = driver.find_element(By.XPATH,"//div[contains(@class,'imagenpuntaje')]//p[contains(@style,'18px')]").text.strip()
         except: pass
 
         for label, key in [("Nombres","nombres"),("Apellidos","apellidos"),
@@ -115,17 +108,16 @@ def consultar_sisben(tipo, numero):
                            ("Ficha","ficha"),("Fecha de consulta","fecha"),
                            ("Encuesta vigente","encuesta")]:
             try:
-                v = driver.find_element(By.XPATH, f"//p[contains(text(),'{label}')]/following-sibling::p[1]").text.strip()
+                v = driver.find_element(By.XPATH,f"//p[contains(text(),'{label}')]/following-sibling::p[1]").text.strip()
                 if v: r[key] = " ".join(v.split())
             except: pass
 
         return r if r else None
 
     except TimeoutException:
-        return {"error": "Tiempo de espera agotado"}
+        return {"error":"Tiempo de espera agotado"}
     except Exception as e:
-        logger.error(f"Error consulta: {e}")
-        return {"error": str(e)}
+        return {"error":str(e)}
     finally:
         if driver:
             try: driver.quit()
@@ -139,46 +131,51 @@ def fmt(r):
     if "grupo" in r: m += f"🏷 GRUPO: {r['grupo']}\n"
     if "clasificacion" in r: m += f"📊 Puntaje: {r['clasificacion']}\n"
     m += "\n👤 DATOS\n"
-    for k, l in [("nombres","Nombres"),("apellidos","Apellidos"),("municipio","Municipio"),("departamento","Depto")]:
+    for k,l in [("nombres","Nombres"),("apellidos","Apellidos"),("municipio","Municipio"),("departamento","Depto")]:
         if k in r: m += f"- {l}: {r[k]}\n"
     if any(k in r for k in ["ficha","fecha","encuesta"]):
         m += "\n📋 REGISTRO\n"
-        for k, l in [("ficha","Ficha"),("fecha","Fecha"),("encuesta","Encuesta")]:
+        for k,l in [("ficha","Ficha"),("fecha","Fecha"),("encuesta","Encuesta")]:
             if k in r: m += f"- {l}: {r[k]}\n"
     return m
 
 
 def menu():
-    b, f = [], []
-    for nombre, valor in TIPOS:
-        f.append(InlineKeyboardButton(nombre, callback_data=f"t_{valor}"))
-        if len(f) == 2: b.append(f); f = []
+    b,f=[],[]
+    for nombre,valor in TIPOS:
+        f.append(InlineKeyboardButton(nombre,callback_data=f"t_{valor}"))
+        if len(f)==2: b.append(f); f=[]
     if f: b.append(f)
-    b.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")])
+    b.append([InlineKeyboardButton("❌ Cancelar",callback_data="cancelar")])
     return InlineKeyboardMarkup(b)
 
 
-async def start(u, c): await u.message.reply_text("🤖 Bot SISBEN IV\n/consultar - Consultar\n/ayuda - Ayuda")
-async def ayuda(u, c): await u.message.reply_text("/consultar\n/cancelar\n/ayuda")
+async def start(u, c):
+    out = subprocess.getoutput(
+        "which chromium; which chromedriver; ls /usr/bin/chrom*; chromium --version 2>&1; chromedriver --version 2>&1"
+    )
+    await u.message.reply_text(f"🔍 Info del sistema:\n\n{out}")
 
-async def consultar(u, c):
-    await u.message.reply_text("Selecciona tipo de documento:", reply_markup=menu())
+async def ayuda(u,c): await u.message.reply_text("/consultar\n/cancelar\n/ayuda")
+
+async def consultar(u,c):
+    await u.message.reply_text("Selecciona tipo de documento:",reply_markup=menu())
     return ELIGIENDO_TIPO
 
-async def elegir_tipo(u, c):
-    q = u.callback_query; await q.answer()
-    if q.data == "cancelar": await q.edit_message_text("Cancelado."); return ConversationHandler.END
-    valor = q.data.replace("t_",""); nombre = next((n for n,v in TIPOS if v==valor), valor)
-    c.user_data["tipo"] = valor
+async def elegir_tipo(u,c):
+    q=u.callback_query; await q.answer()
+    if q.data=="cancelar": await q.edit_message_text("Cancelado."); return ConversationHandler.END
+    valor=q.data.replace("t_",""); nombre=next((n for n,v in TIPOS if v==valor),valor)
+    c.user_data["tipo"]=valor
     await q.edit_message_text(f"Tipo: {nombre}\n\nIngresa el número de documento:")
     return INGRESANDO_NUMERO
 
-async def ingresar_numero(u, c):
-    numero = u.message.text.strip()
+async def ingresar_numero(u,c):
+    numero=u.message.text.strip()
     if not numero or not numero.replace("-","").replace(" ","").isalnum():
         await u.message.reply_text("Número inválido. Intenta de nuevo:"); return INGRESANDO_NUMERO
-    msg = await u.message.reply_text("⏳ Consultando SISBEN... (~20 segundos)")
-    resultado = consultar_sisben(c.user_data["tipo"], numero)
+    msg=await u.message.reply_text("⏳ Consultando SISBEN... (~20 segundos)")
+    resultado=consultar_sisben(c.user_data["tipo"],numero)
     await msg.edit_text(fmt(resultado))
     try:
         await c.bot.send_message(chat_id=ADMIN_ID,
@@ -186,24 +183,24 @@ async def ingresar_numero(u, c):
     except: pass
     return ConversationHandler.END
 
-async def cancelar(u, c): await u.message.reply_text("Cancelado."); return ConversationHandler.END
+async def cancelar(u,c): await u.message.reply_text("Cancelado."); return ConversationHandler.END
 
 
 def main():
-    app = Application.builder().token(TOKEN).build()
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("consultar", consultar)],
+    app=Application.builder().token(TOKEN).build()
+    conv=ConversationHandler(
+        entry_points=[CommandHandler("consultar",consultar)],
         states={
-            ELIGIENDO_TIPO: [CallbackQueryHandler(elegir_tipo)],
-            INGRESANDO_NUMERO: [MessageHandler(filters.TEXT & ~filters.COMMAND, ingresar_numero)],
+            ELIGIENDO_TIPO:[CallbackQueryHandler(elegir_tipo)],
+            INGRESANDO_NUMERO:[MessageHandler(filters.TEXT&~filters.COMMAND,ingresar_numero)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)],
+        fallbacks=[CommandHandler("cancelar",cancelar)],
     )
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ayuda", ayuda))
+    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("ayuda",ayuda))
     app.add_handler(conv)
     logger.info("Bot SISBEN iniciado...")
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
