@@ -40,6 +40,8 @@ def get_driver():
         opts.add_argument(arg)
     opts.add_experimental_option("excludeSwitches",["enable-logging","enable-automation"])
     opts.add_experimental_option("useAutomationExtension",False)
+
+    # Buscar Chrome/Chromium
     chrome_bin = None
     for path in ["/usr/bin/chromium","/usr/bin/chromium-browser",
                  "/usr/bin/google-chrome","/usr/bin/chrome"]:
@@ -51,15 +53,17 @@ def get_driver():
                 if f in ("chromium","chrome","chromium-browser"):
                     chrome_bin = os.path.join(root,f); break
             if chrome_bin: break
-    if chrome_bin: opts.binary_location = chrome_bin
-    for drv in ["/usr/bin/chromedriver","/usr/local/bin/chromedriver"]:
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+
+    # Buscar chromedriver del sistema (sin webdriver_manager)
+    for drv in ["/usr/bin/chromedriver","/usr/bin/chromium-chromedriver",
+                "/usr/local/bin/chromedriver","/run/current-system/sw/bin/chromedriver"]:
         if os.path.exists(drv):
             return webdriver.Chrome(service=Service(drv),options=opts)
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        return webdriver.Chrome(service=Service(ChromeDriverManager().install()),options=opts)
-    except Exception:
-        return webdriver.Chrome(options=opts)
+    
+    return webdriver.Chrome(options=opts)
+
 
 def consultar_sisben(tipo, numero):
     driver = None
@@ -112,6 +116,7 @@ def consultar_sisben(tipo, numero):
             try: driver.quit()
             except Exception: pass
 
+
 def fmt(r):
     if r is None: return "NO ENCONTRADO\n\nDocumento no registrado en SISBEN IV."
     if "error" in r: return f"Error: {r['error']}"
@@ -127,6 +132,7 @@ def fmt(r):
             if k in r: m += f"- {l}: {r[k]}\n"
     return m
 
+
 def menu():
     b,f=[],[]
     for nombre,valor in TIPOS:
@@ -135,6 +141,7 @@ def menu():
     if f: b.append(f)
     b.append([InlineKeyboardButton("Cancelar",callback_data="cancelar")])
     return InlineKeyboardMarkup(b)
+
 
 async def start(u,c): await u.message.reply_text("Bot SISBEN IV\n/consultar - Consultar\n/ayuda - Ayuda")
 async def ayuda(u,c): await u.message.reply_text("/consultar\n/cancelar\n/ayuda")
@@ -165,6 +172,7 @@ async def ingresar_numero(u,c):
     return ConversationHandler.END
 
 async def cancelar(u,c): await u.message.reply_text("Cancelado."); return ConversationHandler.END
+
 
 def main():
     app=Application.builder().token(TOKEN).build()
