@@ -348,58 +348,107 @@ def fmt_ruaf(r, numero):
 #  MÓDULO 3 - RAMA JUDICIAL
 # ══════════════════════════════════════════════════════════
 def consultar_rama_judicial(numero_doc):
+    """
+    Usa la URL correcta: /procesos/NumeroIdentificacion
+    Extrae procesos, estado (preso/libre) y actuaciones recientes.
+    """
     driver = None
     try:
         driver = get_driver()
         driver.set_page_load_timeout(40)
-        driver.get("https://consultaprocesos.ramajudicial.gov.co/procesos/NombreRazonSocial")
+        # URL CORRECTA para buscar por número de documento
+        driver.get("https://consultaprocesos.ramajudicial.gov.co/procesos/NumeroIdentificacion")
         time.sleep(5)
 
-        # Click en tab de número de identificación si existe
+        wait = WebDriverWait(driver, 20)
+
+        # Seleccionar tipo de persona (Natural)
         try:
-            tab = find_first(driver,[
-                "//a[contains(text(),'Número de identificación')]",
-                "//li[contains(text(),'identificación')]",
-                "//button[contains(text(),'Identificación')]"], timeout=6)
-            if tab: click_safe(driver, tab); time.sleep(1)
+            sel_tipo = find_first(driver,[
+                "//select[contains(@id,'tipoPersona') or contains(@name,'tipoPersona')]",
+                "//select[1]"], timeout=8)
+            if sel_tipo: safe_select(driver, sel_tipo, "PN")  # Persona Natural
+            time.sleep(0.5)
         except: pass
 
+        # Seleccionar tipo de documento (CC)
+        try:
+            sel_doc = find_first(driver,[
+                "//select[contains(@id,'tipoIdentificacion') or contains(@id,'tipoDoc')]",
+                "//select[2]"], timeout=8)
+            if sel_doc: safe_select(driver, sel_doc, "CC")
+            time.sleep(0.5)
+        except: pass
+
+        # Ingresar número
         inp = find_first(driver,[
-            "//input[@type='text' and (contains(@id,'doc') or contains(@id,'Doc') or contains(@id,'num'))]",
-            "//input[@type='number']",
-            "//input[@type='text'][1]"], timeout=12)
-        if not inp: return {"error":"No se encontró el campo de búsqueda"}
+            "//input[contains(@id,'numero') or contains(@id,'Numero') or contains(@id,'identificacion')]",
+            "//input[@type='text'][1]",
+            "//input[@type='number'][1]"], timeout=12)
+        if not inp: return {"error": "No se encontró el campo de documento"}
         safe_send(driver, inp, numero_doc)
         time.sleep(0.5)
 
+        # Click CONSULTAR
         btn = find_first(driver,[
-            "//button[contains(text(),'Buscar') or contains(text(),'Consultar')]",
-            "//input[@type='submit']",
+            "//button[contains(text(),'CONSULTAR') or contains(text(),'Consultar')]",
+            "//input[@value='CONSULTAR' or @value='Consultar']",
             "//button[@type='submit']"], timeout=8)
         if btn: click_safe(driver, btn)
-        time.sleep(9)
+        else: return {"error": "No se encontró el botón de consulta"}
+        time.sleep(10)
 
-        html = driver.page_source
-        if "no se encontr" in html.lower() or "0 resultados" in html.lower() or "sin result" in html.lower():
+        html = driver.page_source.lower()
+
+        # Sin resultados
+        if ("no se encontraron" in html or "no existen procesos" in html
+                or "0 procesos" in html or "sin resultados" in html):
             return None
 
         procesos = []
+        detalles = []
+
+        # Extraer tabla de procesos
         try:
-            filas = driver.find_elements(By.XPATH,"//tbody/tr | //tr[td]")
-            for fila in filas[:10]:
-                celdas = fila.find_elements(By.TAG_NAME,"td")
-                if len(celdas) >= 2:
-                    txt = " | ".join([c.text.strip() for c in celdas if c.text.strip()])
-                    if txt and len(txt) > 5: procesos.append(txt)
+            filas = driver.find_elements(By.XPATH, "//table//tbody/tr | //div[contains(@class,'proceso')]//tr")
+            for fila in filas[:15]:
+                celdas = fila.find_elements(By.TAG_NAME, "td")
+                if len(celdas) >= 3:
+                    datos = [c.text.strip() for c in celdas if c.text.strip()]
+                    if datos:
+                        proceso = {
+                            "numero":     datos[0] if len(datos) > 0 else "",
+                            "despacho":   datos[1] if len(datos) > 1 else "",
+                            "tipo":       datos[2] if len(datos) > 2 else "",
+                            "fecha":      datos[3] if len(datos) > 3 else "",
+                            "estado":     datos[4] if len(datos) > 4 else "",
+                        }
+                        procesos.append(proceso)
         except: pass
 
-        if not procesos:
-            try:
-                body = driver.find_element(By.TAG_NAME,"body").text
-                if len(body) > 100: return {"raw": body[:1500]}
-            except: pass
-        return {"procesos": procesos} if procesos else None
-    except TimeoutException: return {"error":"Tiempo de espera agotado"}
+        # Buscar si hay medidas de aseguramiento / privación de libertad
+        preso = False
+        keywords_preso = ["privación de libertad","detención preventiva","medida de aseguramiento",
+                          "detención domiciliaria","imputado","capturado","detenido"]
+        page_text = driver.find_element(By.TAG_NAME,"body").text.lower()
+        for kw in keywords_preso:
+            if kw in page_text:
+                preso = True; break
+
+        # Contar actuaciones recientes
+        actuaciones_recientes = 0
+        try:
+            badges = driver.find_elements(By.XPATH,"//*[contains(@class,'badge') or contains(@class,'reciente')]")
+            actuaciones_recientes = len(badges)
+        except: pass
+
+        if procesos:
+            return {"procesos": procesos, "preso": preso, "actuaciones": actuaciones_recientes, "total": len(procesos)}
+        elif len(page_text) > 200:
+            return {"raw": page_text[:2000], "preso": preso}
+        return None
+
+    except TimeoutException: return {"error": "Tiempo de espera agotado"}
     except Exception as e: return {"error": str(e).split("Stacktrace")[0].strip()}
     finally:
         if driver:
@@ -407,18 +456,51 @@ def consultar_rama_judicial(numero_doc):
             except: pass
 
 def fmt_rama(r, doc):
-    if r is None: return f"✅ *SIN PROCESOS*\n\nNo se encontraron procesos judiciales para `{doc}`."
+    if r is None:
+        return (
+            "╔════════════════════════════════╗\n"
+            "║     MÓDULO RAMA JUDICIAL       ║\n"
+            "╚════════════════════════════════╝\n\n"
+            f"🔢 *Documento:* `{doc}`\n\n"
+            "✅ *SIN PROCESOS JUDICIALES*\n\n"
+            "🟢 *Estado:* Libre — sin procesos activos\n"
+        )
     if "error" in r: return f"⚠️ *Error Rama Judicial:* `{r['error']}`"
+
     m  = "╔════════════════════════════════╗\n"
     m += "║     MÓDULO RAMA JUDICIAL       ║\n"
     m += "╚════════════════════════════════╝\n\n"
     m += f"🔢 *Documento:* `{doc}`\n\n"
+
+    # Estado privación de libertad
+    if r.get("preso"):
+        m += "🔴 *ALERTA:* Posible privación de libertad\n_(medida de aseguramiento detectada)_\n\n"
+    else:
+        m += "🟢 *Sin medidas de aseguramiento detectadas*\n\n"
+
     if "procesos" in r and r["procesos"]:
-        m += f"⚖️ *Procesos encontrados:* {len(r['procesos'])}\n\n"
-        for i,p in enumerate(r["procesos"][:8],1):
-            m += f"*{i}.* `{p[:250]}`\n\n"
+        total = r.get("total", len(r["procesos"]))
+        m += f"⚖️ *Procesos encontrados:* {total}\n"
+        if r.get("actuaciones"): m += f"📅 *Con actuaciones recientes:* {r['actuaciones']}\n"
+        m += "\n──────────────────────────────\n"
+        for i, p in enumerate(r["procesos"][:8], 1):
+            m += f"\n*Proceso {i}*\n"
+            if p.get("numero"):   m += f"  📁 *Radicado:* `{p['numero']}`\n"
+            if p.get("despacho"): m += f"  🏛 *Despacho:* {p['despacho']}\n"
+            if p.get("tipo"):     m += f"  📋 *Tipo:* {p['tipo']}\n"
+            if p.get("fecha"):    m += f"  📅 *Fecha:* {p['fecha']}\n"
+            if p.get("estado"):   m += f"  📌 *Estado:* {p['estado']}\n"
+        if total > 8:
+            m += f"\n_...y {total-8} proceso(s) más_\n"
     elif "raw" in r:
-        m += f"📄 *Datos:*\n`{r['raw'][:1000]}`\n"
+        # Limpiar texto del raw y mostrar solo lo relevante
+        raw = r["raw"]
+        lineas_utiles = [l.strip() for l in raw.split("\n")
+                         if l.strip() and len(l.strip()) > 5
+                         and not any(x in l.lower() for x in
+                             ["visitantes","teléfono","calle","correo","politica","reporte","total de"])]
+        m += "📄 *Información encontrada:*\n"
+        m += "\n".join(lineas_utiles[:20])
     return m
 
 # ══════════════════════════════════════════════════════════
