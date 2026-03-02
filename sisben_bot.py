@@ -2,43 +2,28 @@
 # -*- coding: utf-8 -*-
 """
 ==============================================================================
-                    CONSULTA SISBEN - BOT DE TELEGRAM
-                    + Soporte Base de Datos ANI
-==============================================================================
-Version: 2.0
+                    CONSULTA SISBEN - BOT DE TELEGRAM v3.0
+                    Versión rápida con requests (sin Selenium)
 ==============================================================================
 """
 
 import logging
-import time
-import os
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import requests
+from bs4 import BeautifulSoup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     MessageHandler,
     filters,
     ContextTypes,
     ConversationHandler,
 )
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException
 
 # ── Configuracion ─────────────────────────────────────────────────────────────
 TOKEN    = "8574051542:AAH_N4RBST0wCpkLKDOFNEc1R93vePWxEPY"
 ADMIN_ID = 8114050673
-
-# ── Configuracion Base de Datos ANI (llenar cuando tengas acceso) ─────────────
-DB_HOST     = "TU_IP_SERVIDOR"   # Ej: "192.168.1.100"
-DB_PORT     = 3306
-DB_USER     = "root"
-DB_PASSWORD = "TU_CONTRASENA"
-DB_NAME     = "ani"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -46,315 +31,231 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Estados conversacion
-ELIGIENDO_TIPO, INGRESANDO_NUMERO, CONFIRMANDO = range(3)
+# Estados
+ELIGIENDO_TIPO, INGRESANDO_NUMERO = range(2)
 
-TIPOS_DOCUMENTO = {
-    "1️⃣ Registro Civil":               "1",
-    "2️⃣ Tarjeta de Identidad":         "2",
-    "3️⃣ Cedula de Ciudadania":         "3",
-    "4️⃣ Cedula de Extranjeria":        "4",
-    "5️⃣ DNI (Pais de origen)":         "5",
-    "6️⃣ DNI (Pasaporte)":              "6",
-    "7️⃣ Salvoconducto Refugiado":      "7",
-    "8️⃣ Permiso Especial Permanencia": "8",
-    "9️⃣ Permiso Proteccion Temporal":  "9",
+TIPOS_DOCUMENTO = [
+    ("📄 Registro Civil",              "1"),
+    ("🪪 Tarjeta de Identidad",        "2"),
+    ("🆔 Cédula de Ciudadanía",        "3"),
+    ("🌐 Cédula de Extranjería",       "4"),
+    ("📋 DNI País de Origen",          "5"),
+    ("📘 DNI Pasaporte",               "6"),
+    ("🛡️ Salvoconducto Refugiado",     "7"),
+    ("📝 Permiso Esp. Permanencia",    "8"),
+    ("🔖 Permiso Protec. Temporal",    "9"),
+]
+
+URL_SISBEN = "https://www.sisben.gov.co/dnp_sisbenconsulta"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Referer": "https://www.sisben.gov.co/Paginas/consulta-tu-grupo.html",
+    "Origin": "https://www.sisben.gov.co",
 }
 
-URL_PAGINA = "https://www.sisben.gov.co/Paginas/consulta-tu-grupo.html"
 
-
-# ── Base de Datos ANI ─────────────────────────────────────────────────────────
-def consultar_bd_ani(numero_documento):
-    """
-    Consulta datos adicionales del ciudadano en la BD ANI.
-    Retorna dict con datos o None si no hay conexion.
-    """
+# ── Consulta rápida con requests ──────────────────────────────────────────────
+def consultar_sisben(tipo_doc, numero_doc):
     try:
-        import pymysql
-        conn = pymysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            connect_timeout=5
+        session = requests.Session()
+        session.headers.update(HEADERS)
+
+        # Primero cargar la página para obtener cookies/tokens
+        session.get(
+            "https://www.sisben.gov.co/Paginas/consulta-tu-grupo.html",
+            timeout=10
         )
-        cursor = conn.cursor(pymysql.cursors.DictCursor)
-        cursor.execute("""
-            SELECT
-                ANINombresExtenso    AS nombre,
-                ANIFchNacimiento     AS fecha_nacimiento,
-                ANISexo              AS sexo,
-                ANIEstatura          AS estatura,
-                ANIFchExpedicion     AS fecha_expedicion,
-                ANIDireccion         AS direccion
-            FROM ani
-            WHERE ANINuip = %s
-            LIMIT 1
-        """, (numero_documento,))
-        fila = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        return fila
-    except Exception as e:
-        logger.warning(f"BD ANI no disponible: {e}")
-        return None
 
-
-# ── Selenium ──────────────────────────────────────────────────────────────────
-def configurar_navegador():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--log-level=3")
-    chrome_options.add_argument("--silent")
-    chrome_options.add_argument("--disable-logging")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=chrome_options
-        )
-    except Exception:
-        driver = webdriver.Chrome(options=chrome_options)
-    return driver
-
-
-def realizar_consulta_sisben(tipo_documento, numero_documento):
-    driver = configurar_navegador()
-    resultado = {}
-    try:
-        driver.get(URL_PAGINA)
-        time.sleep(8)
-
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        for iframe in iframes:
-            try:
-                driver.switch_to.frame(iframe)
-                if driver.find_elements(By.ID, "TipoID"):
-                    break
-                driver.switch_to.default_content()
-            except Exception:
-                driver.switch_to.default_content()
-
-        wait = WebDriverWait(driver, 20)
-        try:
-            select_elem = wait.until(EC.presence_of_element_located((By.ID, "TipoID")))
-        except Exception:
-            select_elem = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "select[name='TipoID']")))
-
-        Select(select_elem).select_by_value(tipo_documento)
-        time.sleep(1)
-
-        input_doc = driver.find_element(By.ID, "documento")
-        input_doc.clear()
-        input_doc.send_keys(numero_documento)
-        time.sleep(1)
-
-        boton = driver.find_element(By.ID, "botonenvio")
-        driver.execute_script("arguments[0].click();", boton)
-        time.sleep(8)
-
-        html = driver.page_source
-        if "no se encontr" in html.lower():
-            return None
-
-        try:
-            grupo = driver.find_element(By.XPATH,
-                "//p[contains(@class, 'text-uppercase') and contains(@class, 'text-white')]")
-            resultado["grupo"] = grupo.text.strip()
-        except Exception:
-            pass
-
-        try:
-            clasif = driver.find_element(By.XPATH,
-                "//div[contains(@class, 'imagenpuntaje')]//p[contains(@style, '18px')]")
-            resultado["clasificacion"] = clasif.text.strip()
-        except Exception:
-            pass
-
-        campos = {
-            "Fecha de consulta":   "fecha",
-            "Ficha":               "ficha",
-            "Nombres":             "nombres",
-            "Apellidos":           "apellidos",
-            "Tipo de documento":   "tipo_doc",
-            "Número de documento": "num_doc",
-            "Municipio":           "municipio",
-            "Departamento":        "departamento",
-            "Encuesta vigente":    "encuesta",
-            "Nombre administrador":"admin",
-            "Dirección":           "direccion",
-            "Teléfono":            "telefono",
-            "Correo":              "correo",
+        # Hacer la consulta
+        data = {
+            "TipoID": tipo_doc,
+            "documento": numero_doc,
         }
 
-        for texto, key in campos.items():
-            try:
-                elem = driver.find_element(By.XPATH,
-                    f"//p[contains(text(), '{texto}')]/following-sibling::p")
-                valor = elem.text.strip()
-                if valor:
-                    resultado[key] = " ".join(valor.split())
-            except Exception:
-                pass
+        resp = session.post(URL_SISBEN, data=data, timeout=15)
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Verificar si no se encontró
+        if "no se encontr" in resp.text.lower():
+            return None
+
+        resultado = {}
+
+        # Grupo SISBEN
+        grupo = soup.find("p", class_=lambda c: c and "text-uppercase" in c and "text-white" in c)
+        if grupo:
+            resultado["grupo"] = grupo.get_text(strip=True)
+
+        # Clasificacion/Puntaje
+        clasif = soup.find("div", class_=lambda c: c and "imagenpuntaje" in c)
+        if clasif:
+            p = clasif.find("p", style=lambda s: s and "18px" in s)
+            if p:
+                resultado["clasificacion"] = p.get_text(strip=True)
+
+        # Campos de datos
+        campos = {
+            "Fecha de consulta":    "fecha",
+            "Ficha":                "ficha",
+            "Nombres":              "nombres",
+            "Apellidos":            "apellidos",
+            "Tipo de documento":    "tipo_doc",
+            "Número de documento":  "num_doc",
+            "Municipio":            "municipio",
+            "Departamento":         "departamento",
+            "Encuesta vigente":     "encuesta",
+            "Nombre administrador": "admin",
+            "Dirección":            "direccion",
+            "Teléfono":             "telefono",
+            "Correo":               "correo",
+        }
+
+        parrafos = soup.find_all("p")
+        for i, p in enumerate(parrafos):
+            texto = p.get_text(strip=True)
+            for campo, key in campos.items():
+                if campo in texto and i + 1 < len(parrafos):
+                    valor = parrafos[i + 1].get_text(strip=True)
+                    if valor:
+                        resultado[key] = " ".join(valor.split())
+
+        return resultado if resultado else None
 
     except Exception as e:
-        logger.error(f"Error Selenium: {e}")
-        resultado["error"] = str(e)
-    finally:
-        driver.quit()
-
-    return resultado
+        logger.error(f"Error consulta: {e}")
+        return {"error": str(e)}
 
 
-# ── Formatear resultado ───────────────────────────────────────────────────────
-def formatear_resultado(sisben, ani):
-    if not sisben:
+def formatear_resultado(r):
+    if not r:
         return (
-            "❌ *NO SE ENCONTRARON RESULTADOS*\n\n"
-            "El documento NO está en el SISBEN IV\n"
-            "o los datos ingresados son incorrectos."
+            "❌ *NO ENCONTRADO*\n\n"
+            "Este documento no está registrado en el SISBEN IV\n"
+            "o los datos son incorrectos."
         )
 
-    if "error" in sisben:
-        return f"⚠️ *Error al consultar:*\n`{sisben['error']}`"
+    if "error" in r:
+        return f"⚠️ *Error al consultar:*\n`{r['error']}`"
 
-    msg = "✅ *RESULTADO DE LA CONSULTA SISBEN IV*\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg = "✅ *RESULTADO SISBEN IV*\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
-    if "grupo" in sisben:
-        msg += f"🏷️ *GRUPO SISBEN:* `{sisben['grupo']}`\n"
-        if "clasificacion" in sisben:
-            msg += f"📊 *Clasificacion:* `{sisben['clasificacion']}`\n"
-        msg += "\n"
+    if "grupo" in r:
+        msg += f"🏷 *GRUPO:* `{r['grupo']}`\n"
+    if "clasificacion" in r:
+        msg += f"📊 *Puntaje:* `{r['clasificacion']}`\n"
 
-    msg += "👤 *DATOS PERSONALES*\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    if "nombres"      in sisben: msg += f"• Nombres: `{sisben['nombres']}`\n"
-    if "apellidos"    in sisben: msg += f"• Apellidos: `{sisben['apellidos']}`\n"
-    if "tipo_doc"     in sisben: msg += f"• Tipo Doc: `{sisben['tipo_doc']}`\n"
-    if "num_doc"      in sisben: msg += f"• Numero: `{sisben['num_doc']}`\n"
-    if "municipio"    in sisben: msg += f"• Municipio: `{sisben['municipio']}`\n"
-    if "departamento" in sisben: msg += f"• Departamento: `{sisben['departamento']}`\n"
+    msg += "\n👤 *DATOS PERSONALES*\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    if "nombres"      in r: msg += f"• Nombres: `{r['nombres']}`\n"
+    if "apellidos"    in r: msg += f"• Apellidos: `{r['apellidos']}`\n"
+    if "num_doc"      in r: msg += f"• Cédula: `{r['num_doc']}`\n"
+    if "municipio"    in r: msg += f"• Municipio: `{r['municipio']}`\n"
+    if "departamento" in r: msg += f"• Dpto: `{r['departamento']}`\n"
 
-    # Datos extra BD ANI
-    if ani:
-        msg += "\n📁 *DATOS ADICIONALES (ANI)*\n"
-        msg += "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        if ani.get("fecha_nacimiento"): msg += f"• Fecha Nacimiento: `{ani['fecha_nacimiento']}`\n"
-        if ani.get("sexo"):             msg += f"• Sexo: `{ani['sexo']}`\n"
-        if ani.get("estatura"):         msg += f"• Estatura: `{ani['estatura']} cm`\n"
-        if ani.get("fecha_expedicion"): msg += f"• Fecha Expedicion: `{ani['fecha_expedicion']}`\n"
-        if ani.get("direccion"):        msg += f"• Dirección: `{ani['direccion']}`\n"
+    if any(k in r for k in ["ficha", "fecha", "encuesta"]):
+        msg += "\n📋 *REGISTRO*\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        if "ficha"    in r: msg += f"• Ficha: `{r['ficha']}`\n"
+        if "fecha"    in r: msg += f"• Fecha: `{r['fecha']}`\n"
+        if "encuesta" in r: msg += f"• Encuesta: `{r['encuesta']}`\n"
 
-    if any(k in sisben for k in ["ficha", "fecha", "encuesta"]):
-        msg += "\n📋 *INFORMACION DEL REGISTRO*\n"
-        msg += "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        if "ficha"    in sisben: msg += f"• Ficha: `{sisben['ficha']}`\n"
-        if "fecha"    in sisben: msg += f"• Fecha Consulta: `{sisben['fecha']}`\n"
-        if "encuesta" in sisben: msg += f"• Encuesta Vigente: `{sisben['encuesta']}`\n"
-
-    if any(k in sisben for k in ["admin", "telefono", "correo"]):
-        msg += "\n📞 *CONTACTO OFICINA SISBEN*\n"
-        msg += "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        if "admin"    in sisben: msg += f"• Admin: `{sisben['admin']}`\n"
-        if "telefono" in sisben: msg += f"• Teléfono: `{sisben['telefono']}`\n"
-        if "correo"   in sisben: msg += f"• Correo: `{sisben['correo']}`\n"
+    if any(k in r for k in ["admin", "telefono", "correo"]):
+        msg += "\n📞 *OFICINA SISBEN*\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        if "admin"    in r: msg += f"• Admin: `{r['admin']}`\n"
+        if "telefono" in r: msg += f"• Tel: `{r['telefono']}`\n"
+        if "correo"   in r: msg += f"• Correo: `{r['correo']}`\n"
 
     return msg
 
 
-# ── Handlers Telegram ─────────────────────────────────────────────────────────
+# ── Teclado inline ────────────────────────────────────────────────────────────
+def teclado_tipos():
+    botones = []
+    fila = []
+    for i, (nombre, valor) in enumerate(TIPOS_DOCUMENTO):
+        fila.append(InlineKeyboardButton(nombre, callback_data=f"tipo_{valor}"))
+        if len(fila) == 2:
+            botones.append(fila)
+            fila = []
+    if fila:
+        botones.append(fila)
+    botones.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")])
+    return InlineKeyboardMarkup(botones)
+
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 *Bienvenido al Bot de Consulta SISBEN IV*\n\n"
-        "🇨🇴 Republica de Colombia\n"
-        "🏛️ Departamento Nacional de Planeacion - DNP\n\n"
-        "Usa /consultar para iniciar.\n"
-        "Usa /cancelar para cancelar.",
+        "👋 *Bot Consulta SISBEN IV*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🇨🇴 DNP — República de Colombia\n\n"
+        "📌 Comandos:\n"
+        "• /consultar — Consultar SISBEN\n"
+        "• /ayuda — Ver ayuda\n"
+        "• /cancelar — Cancelar consulta",
         parse_mode="Markdown"
     )
 
 
 async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    teclado = [[t] for t in TIPOS_DOCUMENTO.keys()]
     await update.message.reply_text(
         "📋 *Selecciona el tipo de documento:*",
         parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(teclado, one_time_keyboard=True, resize_keyboard=True)
+        reply_markup=teclado_tipos()
     )
     return ELIGIENDO_TIPO
 
 
 async def elegir_tipo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text
-    if texto not in TIPOS_DOCUMENTO:
-        await update.message.reply_text("❌ Opción inválida. Selecciona una del menú.")
-        return ELIGIENDO_TIPO
+    query = update.callback_query
+    await query.answer()
 
-    context.user_data["tipo_doc"]    = TIPOS_DOCUMENTO[texto]
-    context.user_data["tipo_nombre"] = texto
+    if query.data == "cancelar":
+        await query.edit_message_text("❌ Consulta cancelada.")
+        return ConversationHandler.END
 
-    await update.message.reply_text(
-        f"✅ Seleccionado: *{texto}*\n\n🔢 Ingresa el *número de documento:*",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
+    valor = query.data.replace("tipo_", "")
+    nombre = next((n for n, v in TIPOS_DOCUMENTO if v == valor), valor)
+
+    context.user_data["tipo_doc"]    = valor
+    context.user_data["tipo_nombre"] = nombre
+
+    await query.edit_message_text(
+        f"✅ *{nombre}*\n\n🔢 Ingresa el número de documento:",
+        parse_mode="Markdown"
     )
     return INGRESANDO_NUMERO
 
 
 async def ingresar_numero(update: Update, context: ContextTypes.DEFAULT_TYPE):
     numero = update.message.text.strip()
+
     if not numero or not numero.replace("-", "").replace(" ", "").isalnum():
         await update.message.reply_text("❌ Número inválido. Intenta de nuevo:")
         return INGRESANDO_NUMERO
 
-    context.user_data["num_doc"] = numero
-    teclado = [["✅ Si, consultar", "❌ Cancelar"]]
-    await update.message.reply_text(
-        f"🔍 *Confirmar consulta:*\n\n"
-        f"• Tipo: `{context.user_data['tipo_nombre']}`\n"
-        f"• Número: `{numero}`\n\n¿Deseas continuar?",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(teclado, one_time_keyboard=True, resize_keyboard=True)
-    )
-    return CONFIRMANDO
-
-
-async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "Cancelar" in update.message.text:
-        await update.message.reply_text("❌ Consulta cancelada.", reply_markup=ReplyKeyboardRemove())
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "⏳ *Consultando...*\n\nEspera un momento por favor.",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    msg = await update.message.reply_text("⏳ *Consultando SISBEN...*", parse_mode="Markdown")
 
     tipo   = context.user_data["tipo_doc"]
-    numero = context.user_data["num_doc"]
+    resultado = consultar_sisben(tipo, numero)
+    mensaje   = formatear_resultado(resultado)
 
-    sisben = realizar_consulta_sisben(tipo, numero)
-    ani    = consultar_bd_ani(numero)
+    await msg.edit_text(mensaje, parse_mode="Markdown")
 
-    mensaje = formatear_resultado(sisben, ani)
-    await update.message.reply_text(mensaje, parse_mode="Markdown")
-
+    # Notificar admin
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=f"📊 *Nueva consulta*\n"
                  f"• Usuario: `{update.effective_user.id}`\n"
                  f"• Nombre: {update.effective_user.full_name}\n"
-                 f"• Documento: `{numero}`",
+                 f"• Doc: `{numero}`",
             parse_mode="Markdown"
         )
     except Exception:
@@ -364,20 +265,18 @@ async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❌ Cancelado. Usa /consultar para una nueva consulta.",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text("❌ Cancelado. Usa /consultar para una nueva consulta.")
     return ConversationHandler.END
 
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "ℹ️ *Comandos disponibles:*\n\n"
-        "/start - Iniciar el bot\n"
-        "/consultar - Hacer una consulta SISBEN\n"
-        "/cancelar - Cancelar consulta actual\n"
-        "/ayuda - Ver esta ayuda",
+        "ℹ️ *Ayuda — Bot SISBEN IV*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "• /consultar — Iniciar consulta\n"
+        "• /cancelar — Cancelar\n"
+        "• /ayuda — Esta ayuda\n\n"
+        "💡 *Tip:* La consulta tarda solo unos segundos.",
         parse_mode="Markdown"
     )
 
@@ -389,18 +288,17 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler("consultar", consultar)],
         states={
-            ELIGIENDO_TIPO:    [MessageHandler(filters.TEXT & ~filters.COMMAND, elegir_tipo)],
+            ELIGIENDO_TIPO:    [CallbackQueryHandler(elegir_tipo)],
             INGRESANDO_NUMERO: [MessageHandler(filters.TEXT & ~filters.COMMAND, ingresar_numero)],
-            CONFIRMANDO:       [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ayuda", ayuda))
+    app.add_handler(CommandHandler("start",   start))
+    app.add_handler(CommandHandler("ayuda",   ayuda))
     app.add_handler(conv)
 
-    print("🤖 Bot SISBEN v2.0 iniciado...")
+    print("🤖 Bot SISBEN v3.0 iniciado...")
     app.run_polling()
 
 
