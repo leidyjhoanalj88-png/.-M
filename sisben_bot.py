@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import logging, time, os
+import logging, time, os, glob
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -47,21 +47,26 @@ def get_driver():
                  "/usr/bin/google-chrome","/usr/bin/chrome"]:
         if os.path.exists(path):
             chrome_bin = path; break
-    if not chrome_bin and os.path.exists("/nix/store"):
-        for root, dirs, files in os.walk("/nix/store"):
-            for f in files:
-                if f in ("chromium","chrome","chromium-browser"):
-                    chrome_bin = os.path.join(root,f); break
-            if chrome_bin: break
+    if not chrome_bin:
+        resultados = glob.glob("/nix/store/*/bin/chromium*")
+        if resultados:
+            chrome_bin = resultados[0]
     if chrome_bin:
         opts.binary_location = chrome_bin
 
-    # Buscar chromedriver del sistema (sin webdriver_manager)
-    for drv in ["/usr/bin/chromedriver","/usr/bin/chromium-chromedriver",
-                "/usr/local/bin/chromedriver","/run/current-system/sw/bin/chromedriver"]:
-        if os.path.exists(drv):
-            return webdriver.Chrome(service=Service(drv),options=opts)
-    
+    # Buscar chromedriver (sin webdriver_manager)
+    chromedriver = None
+    for path in ["/usr/bin/chromedriver","/usr/bin/chromium-chromedriver",
+                 "/usr/local/bin/chromedriver"]:
+        if os.path.exists(path):
+            chromedriver = path; break
+    if not chromedriver:
+        resultados = glob.glob("/nix/store/*/bin/chromedriver*")
+        if resultados:
+            chromedriver = resultados[0]
+
+    if chromedriver:
+        return webdriver.Chrome(service=Service(chromedriver),options=opts)
     return webdriver.Chrome(options=opts)
 
 
