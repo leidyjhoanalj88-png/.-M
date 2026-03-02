@@ -1,19 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import logging, time, os, glob
+import logging, time, os, requests
+from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler,
 )
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException
 
 TOKEN    = "8574051542:AAH_N4RBST0wCpkLKDOFNEc1R93vePWxEPY"
 ADMIN_ID = 8114050673
@@ -31,108 +25,118 @@ TIPOS = [
     ("Permiso Protec. Temporal","9"),
 ]
 
-def get_driver():
-    opts = Options()
-    for arg in ["--headless=new","--no-sandbox","--disable-dev-shm-usage",
-                "--disable-gpu","--disable-extensions",
-                "--blink-settings=imagesEnabled=false",
-                "--window-size=1920,1080","--log-level=3"]:
-        opts.add_argument(arg)
-    opts.add_experimental_option("excludeSwitches",["enable-logging","enable-automation"])
-    opts.add_experimental_option("useAutomationExtension",False)
-
-    # Buscar Chrome/Chromium
-    chrome_bin = None
-    for path in ["/usr/bin/chromium","/usr/bin/chromium-browser",
-                 "/usr/bin/google-chrome","/usr/bin/chrome"]:
-        if os.path.exists(path):
-            chrome_bin = path; break
-    if not chrome_bin:
-        resultados = glob.glob("/nix/store/*/bin/chromium*")
-        if resultados:
-            chrome_bin = resultados[0]
-    if chrome_bin:
-        opts.binary_location = chrome_bin
-
-    # Buscar chromedriver (sin webdriver_manager)
-    chromedriver = None
-    for path in ["/usr/bin/chromedriver","/usr/bin/chromium-chromedriver",
-                 "/usr/local/bin/chromedriver"]:
-        if os.path.exists(path):
-            chromedriver = path; break
-    if not chromedriver:
-        resultados = glob.glob("/nix/store/*/bin/chromedriver*")
-        if resultados:
-            chromedriver = resultados[0]
-
-    if chromedriver:
-        return webdriver.Chrome(service=Service(chromedriver),options=opts)
-    return webdriver.Chrome(options=opts)
-
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
+    "Referer": URL_PAGINA,
+}
 
 def consultar_sisben(tipo, numero):
-    driver = None
     try:
-        driver = get_driver()
-        driver.set_page_load_timeout(30)
-        driver.get(URL_PAGINA)
-        time.sleep(8)
-        iframes = driver.find_elements(By.TAG_NAME,"iframe")
-        encontrado = False
-        for iframe in iframes:
-            try:
-                driver.switch_to.frame(iframe)
-                if driver.find_elements(By.ID,"TipoID"):
-                    encontrado = True; break
-                driver.switch_to.default_content()
-            except Exception:
-                driver.switch_to.default_content()
-        if not encontrado and not driver.find_elements(By.ID,"TipoID"):
-            return {"error":"Formulario no encontrado"}
-        wait = WebDriverWait(driver,20)
-        Select(wait.until(EC.presence_of_element_located((By.ID,"TipoID")))).select_by_value(tipo)
-        time.sleep(1)
-        inp = driver.find_element(By.ID,"documento"); inp.clear(); inp.send_keys(numero)
-        time.sleep(1)
-        driver.execute_script("arguments[0].click();",driver.find_element(By.ID,"botonenvio"))
-        time.sleep(8)
-        html = driver.page_source
-        if "no se encontr" in html.lower(): return None
+        session = requests.Session()
+        session.headers.update(HEADERS)
+
+        # Primero cargamos la página para obtener tokens/cookies
+        r = session.get(URL_PAGINA, timeout=30)
+        r.raise_for_status()
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Buscar el iframe con el formulario
+        iframe = soup.find("iframe")
+        iframe_url = None
+        if iframe:
+            src = iframe.get("src","")
+            if src.startswith("http"):
+                iframe_url = src
+            elif src:
+                iframe_url = "https://www.sisben.gov.co" + src
+
+        # Si hay iframe, cargarlo
+        if iframe_url:
+            r2 = session.get(iframe_url, timeout=30)
+            soup = BeautifulSoup(r2.text, "html.parser")
+
+        # Buscar campos ocultos del formulario
+        form = soup.find("form")
+        data = {}
+        if form:
+            for inp in form.find_all("input", {"type": ["hidden"]}):
+                name = inp.get("name")
+                val  = inp.get("value","")
+                if name:
+                    data[name] = val
+
+        # Datos principales del formulario
+        data["TipoID"]   = tipo
+        data["documento"] = numero
+
+        # Determinar URL de envío
+        action = None
+        if form:
+            action = form.get("action","")
+        if not action:
+            action = iframe_url or URL_PAGINA
+        elif not action.startswith("http"):
+            action = "https://www.sisben.gov.co" + action
+
+        # Enviar formulario
+        resp = session.post(action, data=data, timeout=30)
+        resp.raise_for_status()
+
+        result_soup = BeautifulSoup(resp.text, "html.parser")
+        html = resp.text.lower()
+
+        if "no se encontr" in html or "no registra" in html:
+            return None
+
         r = {}
-        try: r["grupo"] = driver.find_element(By.XPATH,"//p[contains(@class,'text-uppercase') and contains(@class,'text-white')]").text.strip()
-        except Exception: pass
-        try: r["clasificacion"] = driver.find_element(By.XPATH,"//div[contains(@class,'imagenpuntaje')]//p[contains(@style,'18px')]").text.strip()
-        except Exception: pass
-        for label,key in [("Nombres","nombres"),("Apellidos","apellidos"),("Municipio","municipio"),
-                          ("Departamento","departamento"),("Ficha","ficha"),("Fecha de consulta","fecha"),
-                          ("Encuesta vigente","encuesta"),("Nombre administrador","admin"),
-                          ("Telefono","telefono"),("Correo","correo")]:
-            try:
-                v = driver.find_element(By.XPATH,f"//p[contains(text(),'{label}')]/following-sibling::p[1]").text.strip()
-                if v: r[key] = " ".join(v.split())
-            except Exception: pass
+
+        # Extraer grupo
+        grupo_tag = result_soup.find(lambda t: t.name=="p" and "text-uppercase" in t.get("class",[]) and "text-white" in t.get("class",[]))
+        if grupo_tag:
+            r["grupo"] = grupo_tag.text.strip()
+
+        # Extraer puntaje/clasificación
+        puntaje = result_soup.find(lambda t: t.name=="p" and t.get("style","") and "18px" in t.get("style",""))
+        if puntaje:
+            r["clasificacion"] = puntaje.text.strip()
+
+        # Extraer campos por etiqueta
+        for label, key in [
+            ("Nombres","nombres"),("Apellidos","apellidos"),
+            ("Municipio","municipio"),("Departamento","departamento"),
+            ("Ficha","ficha"),("Fecha de consulta","fecha"),
+            ("Encuesta vigente","encuesta"),
+        ]:
+            tag = result_soup.find(lambda t, l=label: t.name=="p" and l in t.text)
+            if tag:
+                sib = tag.find_next_sibling("p")
+                if sib and sib.text.strip():
+                    r[key] = " ".join(sib.text.strip().split())
+
         return r if r else None
-    except TimeoutException:
-        return {"error":"Tiempo de espera agotado"}
+
+    except requests.exceptions.Timeout:
+        return {"error": "Tiempo de espera agotado"}
+    except requests.exceptions.RequestException as e:
+        return {"error": f"Error de conexión: {str(e)}"}
     except Exception as e:
-        return {"error":str(e)}
-    finally:
-        if driver:
-            try: driver.quit()
-            except Exception: pass
+        return {"error": str(e)}
 
 
 def fmt(r):
-    if r is None: return "NO ENCONTRADO\n\nDocumento no registrado en SISBEN IV."
-    if "error" in r: return f"Error: {r['error']}"
-    m = "RESULTADO SISBEN IV\n\n"
-    if "grupo" in r: m += f"GRUPO: {r['grupo']}\n"
-    if "clasificacion" in r: m += f"Puntaje: {r['clasificacion']}\n"
-    m += "\nDATOS\n"
+    if r is None: return "❌ NO ENCONTRADO\n\nDocumento no registrado en SISBEN IV."
+    if "error" in r: return f"⚠️ Error: {r['error']}"
+    m = "✅ RESULTADO SISBEN IV\n\n"
+    if "grupo" in r: m += f"🏷 GRUPO: {r['grupo']}\n"
+    if "clasificacion" in r: m += f"📊 Puntaje: {r['clasificacion']}\n"
+    m += "\n👤 DATOS\n"
     for k,l in [("nombres","Nombres"),("apellidos","Apellidos"),("municipio","Municipio"),("departamento","Depto")]:
         if k in r: m += f"- {l}: {r[k]}\n"
     if any(k in r for k in ["ficha","fecha","encuesta"]):
-        m += "\nREGISTRO\n"
+        m += "\n📋 REGISTRO\n"
         for k,l in [("ficha","Ficha"),("fecha","Fecha"),("encuesta","Encuesta")]:
             if k in r: m += f"- {l}: {r[k]}\n"
     return m
@@ -144,11 +148,11 @@ def menu():
         f.append(InlineKeyboardButton(nombre,callback_data=f"t_{valor}"))
         if len(f)==2: b.append(f); f=[]
     if f: b.append(f)
-    b.append([InlineKeyboardButton("Cancelar",callback_data="cancelar")])
+    b.append([InlineKeyboardButton("❌ Cancelar",callback_data="cancelar")])
     return InlineKeyboardMarkup(b)
 
 
-async def start(u,c): await u.message.reply_text("Bot SISBEN IV\n/consultar - Consultar\n/ayuda - Ayuda")
+async def start(u,c): await u.message.reply_text("🤖 Bot SISBEN IV\n/consultar - Consultar\n/ayuda - Ayuda")
 async def ayuda(u,c): await u.message.reply_text("/consultar\n/cancelar\n/ayuda")
 
 async def consultar(u,c):
@@ -160,19 +164,19 @@ async def elegir_tipo(u,c):
     if q.data=="cancelar": await q.edit_message_text("Cancelado."); return ConversationHandler.END
     valor=q.data.replace("t_",""); nombre=next((n for n,v in TIPOS if v==valor),valor)
     c.user_data["tipo"]=valor
-    await q.edit_message_text(f"Tipo: {nombre}\n\nIngresa el numero de documento:")
+    await q.edit_message_text(f"Tipo: {nombre}\n\nIngresa el número de documento:")
     return INGRESANDO_NUMERO
 
 async def ingresar_numero(u,c):
     numero=u.message.text.strip()
     if not numero or not numero.replace("-","").replace(" ","").isalnum():
-        await u.message.reply_text("Numero invalido. Intenta de nuevo:"); return INGRESANDO_NUMERO
-    msg=await u.message.reply_text("Consultando SISBEN... (~15 segundos)")
+        await u.message.reply_text("Número inválido. Intenta de nuevo:"); return INGRESANDO_NUMERO
+    msg=await u.message.reply_text("⏳ Consultando SISBEN... (~10 segundos)")
     resultado=consultar_sisben(c.user_data["tipo"],numero)
     await msg.edit_text(fmt(resultado))
     try:
         await c.bot.send_message(chat_id=ADMIN_ID,
-            text=f"Consulta\nID: {u.effective_user.id}\nNombre: {u.effective_user.full_name}\nDoc: {numero}")
+            text=f"📌 Consulta\nID: {u.effective_user.id}\nNombre: {u.effective_user.full_name}\nDoc: {numero}")
     except Exception: pass
     return ConversationHandler.END
 
@@ -192,7 +196,7 @@ def main():
     app.add_handler(CommandHandler("start",start))
     app.add_handler(CommandHandler("ayuda",ayuda))
     app.add_handler(conv)
-    print("Bot SISBEN v5.0 iniciado...")
+    print("Bot SISBEN v6.0 (sin Selenium) iniciado...")
     app.run_polling()
 
 if __name__=="__main__": main()
