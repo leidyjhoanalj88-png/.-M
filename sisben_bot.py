@@ -1,17 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import logging, time, os, requests
-from bs4 import BeautifulSoup
+import logging, time, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler,
 )
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException
+from webdriver_manager.chrome import ChromeDriverManager
 
 TOKEN    = "8574051542:AAH_N4RBST0wCpkLKDOFNEc1R93vePWxEPY"
 ADMIN_ID = 8114050673
-URL_PAGINA = "https://www.sisben.gov.co/Paginas/consulta-tu-grupo.html"
+URL_PAGINA = "https://reportes.sisben.gov.co/DNP_SisbenConsulta"
 ELIGIENDO_TIPO, INGRESANDO_NUMERO = range(2)
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -25,105 +32,96 @@ TIPOS = [
     ("Permiso Protec. Temporal","9"),
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
-    "Referer": URL_PAGINA,
-}
+def get_driver():
+    opts = Options()
+    for arg in ["--headless=new","--no-sandbox","--disable-dev-shm-usage",
+                "--disable-gpu","--disable-extensions",
+                "--blink-settings=imagesEnabled=false",
+                "--window-size=1920,1080","--log-level=3"]:
+        opts.add_argument(arg)
+    opts.add_experimental_option("excludeSwitches",["enable-logging","enable-automation"])
+    opts.add_experimental_option("useAutomationExtension",False)
+
+    # Buscar Chrome/Chromium instalado por nixpacks
+    chrome_bin = None
+    for path in ["/usr/bin/chromium","/usr/bin/chromium-browser",
+                 "/usr/bin/google-chrome","/usr/bin/chrome",
+                 "/nix/var/nix/profiles/default/bin/chromium"]:
+        if os.path.exists(path):
+            chrome_bin = path
+            break
+    if not chrome_bin:
+        import glob
+        resultados = glob.glob("/nix/store/*/bin/chromium*")
+        if resultados:
+            chrome_bin = resultados[0]
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+
+    try:
+        return webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=opts
+        )
+    except Exception:
+        return webdriver.Chrome(options=opts)
+
 
 def consultar_sisben(tipo, numero):
+    driver = None
     try:
-        session = requests.Session()
-        session.headers.update(HEADERS)
+        driver = get_driver()
+        driver.set_page_load_timeout(30)
+        driver.get(URL_PAGINA)
+        time.sleep(5)
 
-        # Primero cargamos la página para obtener tokens/cookies
-        r = session.get(URL_PAGINA, timeout=30)
-        r.raise_for_status()
+        wait = WebDriverWait(driver, 20)
 
-        soup = BeautifulSoup(r.text, "html.parser")
+        # Seleccionar tipo de documento
+        Select(wait.until(EC.presence_of_element_located((By.ID, "TipoID")))).select_by_value(tipo)
+        time.sleep(1)
 
-        # Buscar el iframe con el formulario
-        iframe = soup.find("iframe")
-        iframe_url = None
-        if iframe:
-            src = iframe.get("src","")
-            if src.startswith("http"):
-                iframe_url = src
-            elif src:
-                iframe_url = "https://www.sisben.gov.co" + src
+        # Ingresar número
+        inp = driver.find_element(By.ID, "documento")
+        inp.clear()
+        inp.send_keys(numero)
+        time.sleep(1)
 
-        # Si hay iframe, cargarlo
-        if iframe_url:
-            r2 = session.get(iframe_url, timeout=30)
-            soup = BeautifulSoup(r2.text, "html.parser")
+        # Click en consultar
+        driver.execute_script("arguments[0].click();", driver.find_element(By.ID, "botonenvio"))
+        time.sleep(8)
 
-        # Buscar campos ocultos del formulario
-        form = soup.find("form")
-        data = {}
-        if form:
-            for inp in form.find_all("input", {"type": ["hidden"]}):
-                name = inp.get("name")
-                val  = inp.get("value","")
-                if name:
-                    data[name] = val
-
-        # Datos principales del formulario
-        data["TipoID"]   = tipo
-        data["documento"] = numero
-
-        # Determinar URL de envío
-        action = None
-        if form:
-            action = form.get("action","")
-        if not action:
-            action = iframe_url or URL_PAGINA
-        elif not action.startswith("http"):
-            action = "https://www.sisben.gov.co" + action
-
-        # Enviar formulario
-        resp = session.post(action, data=data, timeout=30)
-        resp.raise_for_status()
-
-        result_soup = BeautifulSoup(resp.text, "html.parser")
-        html = resp.text.lower()
-
-        if "no se encontr" in html or "no registra" in html:
+        html = driver.page_source
+        if "no se encontr" in html.lower() or "no registra" in html.lower():
             return None
 
         r = {}
+        try:
+            r["grupo"] = driver.find_element(By.XPATH, "//p[contains(@class,'text-uppercase') and contains(@class,'text-white')]").text.strip()
+        except Exception: pass
+        try:
+            r["clasificacion"] = driver.find_element(By.XPATH, "//div[contains(@class,'imagenpuntaje')]//p[contains(@style,'18px')]").text.strip()
+        except Exception: pass
 
-        # Extraer grupo
-        grupo_tag = result_soup.find(lambda t: t.name=="p" and "text-uppercase" in t.get("class",[]) and "text-white" in t.get("class",[]))
-        if grupo_tag:
-            r["grupo"] = grupo_tag.text.strip()
-
-        # Extraer puntaje/clasificación
-        puntaje = result_soup.find(lambda t: t.name=="p" and t.get("style","") and "18px" in t.get("style",""))
-        if puntaje:
-            r["clasificacion"] = puntaje.text.strip()
-
-        # Extraer campos por etiqueta
-        for label, key in [
-            ("Nombres","nombres"),("Apellidos","apellidos"),
-            ("Municipio","municipio"),("Departamento","departamento"),
-            ("Ficha","ficha"),("Fecha de consulta","fecha"),
-            ("Encuesta vigente","encuesta"),
-        ]:
-            tag = result_soup.find(lambda t, l=label: t.name=="p" and l in t.text)
-            if tag:
-                sib = tag.find_next_sibling("p")
-                if sib and sib.text.strip():
-                    r[key] = " ".join(sib.text.strip().split())
+        for label, key in [("Nombres","nombres"),("Apellidos","apellidos"),
+                           ("Municipio","municipio"),("Departamento","departamento"),
+                           ("Ficha","ficha"),("Fecha de consulta","fecha"),
+                           ("Encuesta vigente","encuesta")]:
+            try:
+                v = driver.find_element(By.XPATH, f"//p[contains(text(),'{label}')]/following-sibling::p[1]").text.strip()
+                if v: r[key] = " ".join(v.split())
+            except Exception: pass
 
         return r if r else None
 
-    except requests.exceptions.Timeout:
+    except TimeoutException:
         return {"error": "Tiempo de espera agotado"}
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Error de conexión: {str(e)}"}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        if driver:
+            try: driver.quit()
+            except Exception: pass
 
 
 def fmt(r):
@@ -133,46 +131,46 @@ def fmt(r):
     if "grupo" in r: m += f"🏷 GRUPO: {r['grupo']}\n"
     if "clasificacion" in r: m += f"📊 Puntaje: {r['clasificacion']}\n"
     m += "\n👤 DATOS\n"
-    for k,l in [("nombres","Nombres"),("apellidos","Apellidos"),("municipio","Municipio"),("departamento","Depto")]:
+    for k, l in [("nombres","Nombres"),("apellidos","Apellidos"),("municipio","Municipio"),("departamento","Depto")]:
         if k in r: m += f"- {l}: {r[k]}\n"
     if any(k in r for k in ["ficha","fecha","encuesta"]):
         m += "\n📋 REGISTRO\n"
-        for k,l in [("ficha","Ficha"),("fecha","Fecha"),("encuesta","Encuesta")]:
+        for k, l in [("ficha","Ficha"),("fecha","Fecha"),("encuesta","Encuesta")]:
             if k in r: m += f"- {l}: {r[k]}\n"
     return m
 
 
 def menu():
-    b,f=[],[]
-    for nombre,valor in TIPOS:
-        f.append(InlineKeyboardButton(nombre,callback_data=f"t_{valor}"))
-        if len(f)==2: b.append(f); f=[]
+    b, f = [], []
+    for nombre, valor in TIPOS:
+        f.append(InlineKeyboardButton(nombre, callback_data=f"t_{valor}"))
+        if len(f) == 2: b.append(f); f = []
     if f: b.append(f)
-    b.append([InlineKeyboardButton("❌ Cancelar",callback_data="cancelar")])
+    b.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")])
     return InlineKeyboardMarkup(b)
 
 
-async def start(u,c): await u.message.reply_text("🤖 Bot SISBEN IV\n/consultar - Consultar\n/ayuda - Ayuda")
-async def ayuda(u,c): await u.message.reply_text("/consultar\n/cancelar\n/ayuda")
+async def start(u, c): await u.message.reply_text("🤖 Bot SISBEN IV\n/consultar - Consultar\n/ayuda - Ayuda")
+async def ayuda(u, c): await u.message.reply_text("/consultar\n/cancelar\n/ayuda")
 
-async def consultar(u,c):
-    await u.message.reply_text("Selecciona tipo de documento:",reply_markup=menu())
+async def consultar(u, c):
+    await u.message.reply_text("Selecciona tipo de documento:", reply_markup=menu())
     return ELIGIENDO_TIPO
 
-async def elegir_tipo(u,c):
-    q=u.callback_query; await q.answer()
-    if q.data=="cancelar": await q.edit_message_text("Cancelado."); return ConversationHandler.END
-    valor=q.data.replace("t_",""); nombre=next((n for n,v in TIPOS if v==valor),valor)
-    c.user_data["tipo"]=valor
+async def elegir_tipo(u, c):
+    q = u.callback_query; await q.answer()
+    if q.data == "cancelar": await q.edit_message_text("Cancelado."); return ConversationHandler.END
+    valor = q.data.replace("t_",""); nombre = next((n for n,v in TIPOS if v==valor), valor)
+    c.user_data["tipo"] = valor
     await q.edit_message_text(f"Tipo: {nombre}\n\nIngresa el número de documento:")
     return INGRESANDO_NUMERO
 
-async def ingresar_numero(u,c):
-    numero=u.message.text.strip()
+async def ingresar_numero(u, c):
+    numero = u.message.text.strip()
     if not numero or not numero.replace("-","").replace(" ","").isalnum():
         await u.message.reply_text("Número inválido. Intenta de nuevo:"); return INGRESANDO_NUMERO
-    msg=await u.message.reply_text("⏳ Consultando SISBEN... (~10 segundos)")
-    resultado=consultar_sisben(c.user_data["tipo"],numero)
+    msg = await u.message.reply_text("⏳ Consultando SISBEN... (~15 segundos)")
+    resultado = consultar_sisben(c.user_data["tipo"], numero)
     await msg.edit_text(fmt(resultado))
     try:
         await c.bot.send_message(chat_id=ADMIN_ID,
@@ -180,23 +178,24 @@ async def ingresar_numero(u,c):
     except Exception: pass
     return ConversationHandler.END
 
-async def cancelar(u,c): await u.message.reply_text("Cancelado."); return ConversationHandler.END
+async def cancelar(u, c): await u.message.reply_text("Cancelado."); return ConversationHandler.END
 
 
 def main():
-    app=Application.builder().token(TOKEN).build()
-    conv=ConversationHandler(
-        entry_points=[CommandHandler("consultar",consultar)],
+    app = Application.builder().token(TOKEN).build()
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("consultar", consultar)],
         states={
-            ELIGIENDO_TIPO:[CallbackQueryHandler(elegir_tipo)],
-            INGRESANDO_NUMERO:[MessageHandler(filters.TEXT&~filters.COMMAND,ingresar_numero)],
+            ELIGIENDO_TIPO: [CallbackQueryHandler(elegir_tipo)],
+            INGRESANDO_NUMERO: [MessageHandler(filters.TEXT & ~filters.COMMAND, ingresar_numero)],
         },
-        fallbacks=[CommandHandler("cancelar",cancelar)],
+        fallbacks=[CommandHandler("cancelar", cancelar)],
     )
-    app.add_handler(CommandHandler("start",start))
-    app.add_handler(CommandHandler("ayuda",ayuda))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(conv)
-    print("Bot SISBEN v6.0 (sin Selenium) iniciado...")
+    print("Bot SISBEN v7.0 (Railway+Selenium) iniciado...")
     app.run_polling()
 
-if __name__=="__main__": main()
+if __name__ == "__main__":
+    main()
